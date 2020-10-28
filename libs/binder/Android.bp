@@ -59,6 +59,7 @@ cc_library {
         "MemoryBase.cpp",
         "MemoryDealer.cpp",
         "MemoryHeapBase.cpp",
+        "MemoryHeapIon.cpp",
         "Parcel.cpp",
         "PermissionCache.cpp",
         "PersistableBundle.cpp",
@@ -96,6 +97,10 @@ cc_library {
 
     header_libs: [
         "libbinder_headers",
+    ],
+
+    include_dirs: [
+        "system/core/libion/include",
     ],
 
     export_header_lib_headers: [

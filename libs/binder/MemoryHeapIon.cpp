@@ -39,13 +39,22 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/mman.h>
-#include "ion.h"
+#include <ion/ion.h>
+#include <linux/ion.h>
+
 
 #define HEAP_MASK_FILTER    ((1 << 16) - (2))
 #define FLAG_MASK_FILTER    (~(HEAP_MASK_FILTER) - (1))
 
-namespace android {
+#define ION_HEAP_SYSTEM_MASK (1 << ION_HEAP_TYPE_SYSTEM)
+#define ION_FLAG_PRESERVE_KMAP 4
 
+
+enum { USE_ION_FD  = 0x00008000 };
+
+
+namespace android {
+/*
 uint32_t ion_HeapMask_valid_check(uint32_t flags)
 {
     uint32_t heap_mask, result;
@@ -97,8 +106,78 @@ uint32_t ion_FlagMask_valid_check(uint32_t flags)
 
     return result;
 }
+*/
+struct ion_allocation_data {
+    size_t len;
+    size_t align;
+    unsigned int heap_mask;
+    unsigned int flags;
+    int handle;
+};
 
-MemoryHeapIon::MemoryHeapIon(size_t size, uint32_t flags, char const *name):MemoryHeapBase()
+int ion_client_create(void)
+{
+    return open("/dev/ion", O_RDWR);
+}
+
+void ion_client_destroy(int client)
+{
+    close(client);
+}
+
+void *ion_map(int buffer, size_t len, off_t offset)
+{
+    return mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED,
+                buffer, offset);
+}
+
+int ion_unmap(void *addr, size_t len)
+{
+    return munmap(addr, len);
+}
+void ion_free(int buffer)
+{
+    close(buffer);
+}
+
+int ion_alloc(int client, size_t len, size_t align,
+                     unsigned int heap_mask, unsigned int flags)
+{
+    int ret;
+    struct ion_handle_data arg_free;
+    struct ion_fd_data arg_share;
+    struct ion_allocation_data arg_alloc;
+
+    arg_alloc.len = len;
+    arg_alloc.align = align;
+    arg_alloc.heap_mask = heap_mask;
+    arg_alloc.flags = flags;
+
+    ret = ioctl(client, ION_IOC_ALLOC, &arg_alloc);
+    if (ret < 0)
+        return ret;
+
+    arg_share.handle = arg_alloc.handle;
+    ret = ioctl(client, ION_IOC_SHARE, &arg_share);
+
+    if ((ret >= 0) && (!arg_share.fd)) {
+        ret = ioctl(client, ION_IOC_SHARE, &arg_share);
+        if (ret >= 0)
+            close(0);
+        else
+            ret = 0;
+    }
+
+    arg_free.handle = arg_alloc.handle;
+    ioctl(client, ION_IOC_FREE, &arg_free);
+
+    if (ret < 0)
+        return ret;
+
+    return arg_share.fd;
+}
+
+MemoryHeapIon::MemoryHeapIon(size_t size, uint32_t flags, char const *name __attribute__((unused))):MemoryHeapBase()
 {
     void* base = NULL;
     int fd = -1;
@@ -110,9 +189,9 @@ MemoryHeapIon::MemoryHeapIon(size_t size, uint32_t flags, char const *name):Memo
         ALOGE("MemoryHeapIon : ION client creation failed : %s", strerror(errno));
         mIonClient = -1;
     } else {
-        isReadOnly = flags & (IMemoryHeap::READ_ONLY);
-        heapMask = ion_HeapMask_valid_check(flags);
-        flagMask = ion_FlagMask_valid_check(flags);
+        isReadOnly = 0; //flags & (IMemoryHeap::READ_ONLY);
+        heapMask = 0;   // ion_HeapMask_valid_check(flags);
+        flagMask = 0;   //ion_FlagMask_valid_check(flags);
 
         if (heapMask) {
             ALOGD("MemoryHeapIon : Allocated with size:%d, heap:0x%X , flag:0x%X", size, heapMask, flagMask);
@@ -137,6 +216,7 @@ MemoryHeapIon::MemoryHeapIon(size_t size, uint32_t flags, char const *name):Memo
             flags |= USE_ION_FD;
             base = ion_map(fd, size, 0);
             if (base != MAP_FAILED) {
+                ALOGD("MemoryHeapIon init with fd=%d",fd);
                 init(fd, base, size, flags, NULL);
             } else {
                 ALOGE("MemoryHeapIon : ION mmap failed(size[%u], fd[%d]) : %s", size, fd, strerror(errno));
@@ -146,7 +226,7 @@ MemoryHeapIon::MemoryHeapIon(size_t size, uint32_t flags, char const *name):Memo
     }
 }
 
-MemoryHeapIon::MemoryHeapIon(int fd, size_t size, uint32_t flags, uint32_t offset):MemoryHeapBase()
+MemoryHeapIon::MemoryHeapIon(int fd, size_t size, uint32_t flags, uint32_t offset __attribute__((unused))):MemoryHeapBase()
 {
     void* base = NULL;
     int dup_fd = -1;
@@ -165,6 +245,7 @@ MemoryHeapIon::MemoryHeapIon(int fd, size_t size, uint32_t flags, uint32_t offse
                 flags |= USE_ION_FD;
                 base = ion_map(dup_fd, size, 0);
                 if (base != MAP_FAILED) {
+                    ALOGD("MemoryHeapIon init with dup_fd=%d",dup_fd);
                     init(dup_fd, base, size, flags, NULL);
                 } else {
                     ALOGE("MemoryHeapIon : ION mmap failed(size[%u], fd[%d]): %s", size, fd, strerror(errno));
